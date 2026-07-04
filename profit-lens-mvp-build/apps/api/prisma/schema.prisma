@@ -1,0 +1,138 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// A Shopify store that has installed ProfitLens.
+model Shop {
+  id             String    @id @default(cuid())
+  shopDomain     String    @unique @map("shop_domain")
+  accessToken    String    @map("access_token")
+  scopes         String
+  isActive       Boolean   @default(true) @map("is_active")
+  installedAt    DateTime  @default(now()) @map("installed_at")
+  uninstalledAt  DateTime? @map("uninstalled_at")
+  lastSyncAt     DateTime? @map("last_sync_at")
+  syncStatus     SyncStatus @default(PENDING) @map("sync_status")
+  currencyCode   String    @default("USD") @map("currency_code")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  orders        Order[]
+  profitLeaks   ProfitLeak[]
+  webhookEvents WebhookEvent[]
+
+  @@map("shops")
+}
+
+enum SyncStatus {
+  PENDING
+  SYNCING
+  COMPLETED
+  FAILED
+}
+
+// A synced Shopify order with the financial fields needed for leak analysis.
+model Order {
+  id               String   @id @default(cuid())
+  shopId           String   @map("shop_id")
+  shopifyOrderId   String   @map("shopify_order_id")
+  orderNumber      String   @map("order_number")
+  totalPrice       Decimal  @db.Decimal(12, 2) @map("total_price")
+  subtotalPrice    Decimal  @db.Decimal(12, 2) @map("subtotal_price")
+  totalDiscounts   Decimal  @db.Decimal(12, 2) @map("total_discounts")
+  totalShipping    Decimal  @db.Decimal(12, 2) @map("total_shipping")
+  totalRefunded    Decimal  @db.Decimal(12, 2) @map("total_refunded")
+  totalTax         Decimal  @db.Decimal(12, 2) @map("total_tax")
+  discountCodes    String[] @map("discount_codes")
+  financialStatus  String   @map("financial_status")
+  currencyCode     String   @map("currency_code")
+  processedAt      DateTime @map("processed_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  shop      Shop            @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  lineItems OrderLineItem[]
+
+  @@unique([shopId, shopifyOrderId])
+  @@index([shopId, processedAt])
+  @@map("orders")
+}
+
+model OrderLineItem {
+  id                String  @id @default(cuid())
+  orderId           String  @map("order_id")
+  shopifyProductId  String? @map("shopify_product_id")
+  title             String
+  quantity          Int
+  price             Decimal @db.Decimal(12, 2)
+  totalDiscount     Decimal @db.Decimal(12, 2) @map("total_discount")
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([shopifyProductId])
+  @@map("order_line_items")
+}
+
+enum LeakType {
+  DISCOUNT_OVERUSE
+  HIGH_REFUND_PRODUCT
+  UNPROFITABLE_ORDER
+  FREE_SHIPPING_LOSS
+}
+
+enum LeakSeverity {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum LeakStatus {
+  OPEN
+  DISMISSED
+  RESOLVED
+}
+
+// A detected profit leak for a shop.
+model ProfitLeak {
+  id              String       @id @default(cuid())
+  shopId          String       @map("shop_id")
+  type            LeakType
+  severity        LeakSeverity
+  status          LeakStatus   @default(OPEN)
+  title           String
+  description     String
+  estimatedLossAmount Decimal  @db.Decimal(12, 2) @map("estimated_loss_amount")
+  currencyCode    String       @map("currency_code")
+  // Stable key identifying the leak subject (e.g. discount code, product id)
+  dedupeKey       String       @map("dedupe_key")
+  metadata        Json         @default("{}")
+  detectedAt      DateTime     @default(now()) @map("detected_at")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+
+  shop Shop @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@unique([shopId, type, dedupeKey])
+  @@index([shopId, status])
+  @@map("profit_leaks")
+}
+
+// Processed webhook events, stored for idempotency / dedup.
+model WebhookEvent {
+  id          String   @id @default(cuid())
+  shopId      String?  @map("shop_id")
+  webhookId   String   @unique @map("webhook_id")
+  topic       String
+  processedAt DateTime @default(now()) @map("processed_at")
+
+  shop Shop? @relation(fields: [shopId], references: [id], onDelete: SetNull)
+
+  @@index([topic])
+  @@map("webhook_events")
+}
